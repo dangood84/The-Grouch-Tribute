@@ -4,7 +4,12 @@ unit uhostgtk;
 
 { Linux GTK 2 panel icon + small overlay. Same TGrouchController as
   macOS; this unit presents a GdkPixbuf, polls the user Trash folder,
-  and plays original WAV stings via paplay/aplay. }
+  and plays original WAV stings via paplay/aplay.
+
+  Raspberry Pi OS has no compositor for the gdk rgba colormap — that
+  path is an opaque white sheet (same as Lemmings Overlay). These
+  windows stay on a normal visual and punch a 1-bit X shape from the
+  sprite alpha. }
 
 interface
 
@@ -25,8 +30,7 @@ function gtk_status_icon_new: PGtkStatusIcon; cdecl; external;
 procedure gtk_status_icon_set_from_pixbuf(icon: PGtkStatusIcon; pixbuf: PGdkPixbuf); cdecl; external;
 procedure gtk_status_icon_set_visible(icon: PGtkStatusIcon; visible: gboolean); cdecl; external;
 procedure gtk_status_icon_set_tooltip(icon: PGtkStatusIcon; text: Pgchar); cdecl; external;
-{ FPC's gdk2 ppu often omits this; libgdk-x11-2.0 still exports it. }
-function gdk_screen_get_rgba_colormap(screen: PGdkScreen): PGdkColormap; cdecl; external;
+function gtk_widget_get_window(widget: PGtkWidget): PGdkWindow; cdecl; external;
 
 const
   OverlayW = 160;
@@ -36,13 +40,13 @@ const
   WidgetW = 120;
   WidgetH = 160;
   TickMs = 33;
+  { Pixels below this stay out of the 1-bit mask. AA fringe is ~0.35. }
+  ShapeAlpha = 48;
 
 var
   Controller: TGrouchController;
   Overlay: PGtkWidget;
-  OverlayDraw: PGtkWidget;
   Widget: PGtkWidget;
-  WidgetDraw: PGtkWidget;
   StatusIcon: PGtkStatusIcon;
   OverlayPix, BarPix, WidgetPix: PGdkPixbuf;
   SfxWav: array[sfxLid..sfxSong] of TBytes;
@@ -185,6 +189,60 @@ begin
   gtk_window_move(PGtkWindow(Overlay), W - OverlayW - 24, H - OverlayH - 48);
 end;
 
+function GdkWinOf(Win: PGtkWidget): PGdkWindow;
+begin
+  Result := nil;
+  if Win = nil then
+    Exit;
+  Result := gtk_widget_get_window(Win);
+  if Result = nil then
+    Result := Win^.window;
+end;
+
+procedure ApplyShaped(Win: PGtkWidget; Pix: PGdkPixbuf);
+var
+  GdkWin: PGdkWindow;
+  Mask, Colour: PGdkPixmap;
+  Gc: PGdkGC;
+  W, H: Integer;
+begin
+  { Install RGB as the X background, then punch a 1-bit hole for alpha 0.
+    Expose then copies that pixmap instead of filling the GTK theme white. }
+  if (Win = nil) or (Pix = nil) then
+    Exit;
+  gtk_widget_realize(Win);
+  GdkWin := GdkWinOf(Win);
+  if GdkWin = nil then
+    Exit;
+  W := gdk_pixbuf_get_width(Pix);
+  H := gdk_pixbuf_get_height(Pix);
+  if (W < 1) or (H < 1) then
+    Exit;
+
+  Colour := gdk_pixmap_new(GdkWin, W, H, -1);
+  if Colour <> nil then
+  begin
+    Gc := gdk_gc_new(Colour);
+    if Gc <> nil then
+    begin
+      gdk_draw_rgb_32_image(Colour, Gc, 0, 0, W, H, GDK_RGB_DITHER_NONE,
+        gdk_pixbuf_get_pixels(Pix), gdk_pixbuf_get_rowstride(Pix));
+      g_object_unref(Gc);
+    end;
+    gdk_window_set_back_pixmap(GdkWin, Colour, False);
+    g_object_unref(Colour);
+  end;
+
+  Mask := gdk_pixmap_new(GdkWin, W, H, 1);
+  if Mask <> nil then
+  begin
+    gdk_pixbuf_render_threshold_alpha(Pix, Mask, 0, 0, 0, 0, W, H, ShapeAlpha);
+    gdk_window_shape_combine_mask(GdkWin, Mask, 0, 0);
+    g_object_unref(Mask);
+  end;
+  gdk_window_clear(GdkWin);
+end;
+
 procedure Present;
 begin
   Controller.Render;
@@ -195,10 +253,10 @@ begin
   PixbufFromBuffer(BarPix, Controller.Bar);
   PixbufFromBuffer(WidgetPix, Controller.Widget);
   Controller.ConsumePresent;
-  if OverlayDraw <> nil then
-    gtk_widget_queue_draw(OverlayDraw);
-  if WidgetDraw <> nil then
-    gtk_widget_queue_draw(WidgetDraw);
+  if (Overlay <> nil) and GTK_WIDGET_VISIBLE(Overlay) then
+    ApplyShaped(Overlay, OverlayPix);
+  if (Widget <> nil) and GTK_WIDGET_VISIBLE(Widget) then
+    ApplyShaped(Widget, WidgetPix);
   if (StatusIcon <> nil) and (BarPix <> nil) then
     gtk_status_icon_set_from_pixbuf(StatusIcon, BarPix);
 end;
@@ -270,6 +328,34 @@ begin
   gtk_menu_popup(PGtkMenu(Popup), nil, nil, nil, nil, Button, ActivateTime);
 end;
 
+function OnMapOverlay(W: PGtkWidget; Event: PGdkEvent; Data: gpointer): gboolean; cdecl;
+begin
+  if OverlayPix <> nil then
+    ApplyShaped(W, OverlayPix);
+  Result := False;
+end;
+
+function OnMapWidget(W: PGtkWidget; Event: PGdkEvent; Data: gpointer): gboolean; cdecl;
+begin
+  if WidgetPix <> nil then
+    ApplyShaped(W, WidgetPix);
+  Result := False;
+end;
+
+function OnExposeOverlay(W: PGtkWidget; Event: PGdkEvent; Data: gpointer): gboolean; cdecl;
+begin
+  if OverlayPix <> nil then
+    ApplyShaped(W, OverlayPix);
+  Result := True;
+end;
+
+function OnExposeWidget(W: PGtkWidget; Event: PGdkEvent; Data: gpointer): gboolean; cdecl;
+begin
+  if WidgetPix <> nil then
+    ApplyShaped(W, WidgetPix);
+  Result := True;
+end;
+
 function OnTick(Data: gpointer): gboolean; cdecl;
 begin
   WatchTrash;
@@ -291,44 +377,27 @@ begin
   Result := True;
 end;
 
-function OnExposeOverlay(W: PGtkWidget; Event: PGdkEvent; Data: gpointer): gboolean; cdecl;
-var
-  DestW, DestH: Integer;
-begin
-  Result := False;
-  if (OverlayPix = nil) or (W^.window = nil) then
-    Exit;
-  DestW := gdk_pixbuf_get_width(OverlayPix);
-  DestH := gdk_pixbuf_get_height(OverlayPix);
-  gdk_pixbuf_render_to_drawable(OverlayPix, W^.window,
-    W^.style^.fg_gc[GTK_WIDGET_STATE(W)],
-    0, 0, 0, 0, DestW, DestH, GDK_RGB_DITHER_NONE, 0, 0);
-end;
-
-function OnExposeWidget(W: PGtkWidget; Event: PGdkEvent; Data: gpointer): gboolean; cdecl;
-var
-  DestW, DestH: Integer;
-begin
-  Result := False;
-  if (WidgetPix = nil) or (W^.window = nil) then
-    Exit;
-  DestW := gdk_pixbuf_get_width(WidgetPix);
-  DestH := gdk_pixbuf_get_height(WidgetPix);
-  gdk_pixbuf_render_to_drawable(WidgetPix, W^.window,
-    W^.style^.fg_gc[GTK_WIDGET_STATE(W)],
-    0, 0, 0, 0, DestW, DestH, GDK_RGB_DITHER_NONE, 0, 0);
-end;
-
 function OnWidgetClick(W: PGtkWidget; Event: PGdkEvent; Data: gpointer): gboolean; cdecl;
 begin
   FireIfAllowed(True);
   Result := True;
 end;
 
+procedure DecorateOverlay(Win: PGtkWidget; W, H: Integer);
+begin
+  gtk_window_set_decorated(PGtkWindow(Win), False);
+  gtk_window_set_keep_above(PGtkWindow(Win), True);
+  gtk_window_set_skip_taskbar_hint(PGtkWindow(Win), True);
+  gtk_window_set_skip_pager_hint(PGtkWindow(Win), True);
+  gtk_window_set_accept_focus(PGtkWindow(Win), False);
+  gtk_widget_set_app_paintable(Win, True);
+  gtk_widget_set_double_buffered(Win, False);
+  gtk_window_resize(PGtkWindow(Win), W, H);
+end;
+
 procedure HostRun;
 var
   Screen: PGdkScreen;
-  Colormap: PGdkColormap;
 begin
   gtk_init(@argc, @argv);
   OverlayPix := nil;
@@ -347,36 +416,20 @@ begin
   Screen := gdk_screen_get_default;
   Overlay := gtk_window_new(GTK_WINDOW_TOPLEVEL);
   gtk_window_set_title(PGtkWindow(Overlay), 'The Grouch Tribute');
-  gtk_window_set_decorated(PGtkWindow(Overlay), False);
-  gtk_window_set_keep_above(PGtkWindow(Overlay), True);
-  gtk_window_set_skip_taskbar_hint(PGtkWindow(Overlay), True);
-  gtk_window_set_skip_pager_hint(PGtkWindow(Overlay), True);
-  gtk_window_set_accept_focus(PGtkWindow(Overlay), False);
-  gtk_widget_set_app_paintable(Overlay, True);
-  Colormap := gdk_screen_get_rgba_colormap(Screen);
-  if Colormap <> nil then
-    gtk_widget_set_colormap(Overlay, Colormap);
-  gtk_window_resize(PGtkWindow(Overlay), OverlayW, OverlayH);
-  OverlayDraw := gtk_drawing_area_new;
-  gtk_container_add(PGtkContainer(Overlay), OverlayDraw);
-  g_signal_connect(G_OBJECT(OverlayDraw), 'expose-event', TGCallback(@OnExposeOverlay), nil);
+  DecorateOverlay(Overlay, OverlayW, OverlayH);
+  { No rgba colormap — on the Pi that visual exists but paints white. }
   g_signal_connect(G_OBJECT(Overlay), 'delete-event', TGCallback(@OnQuit), nil);
+  g_signal_connect(G_OBJECT(Overlay), 'map-event', TGCallback(@OnMapOverlay), nil);
+  g_signal_connect(G_OBJECT(Overlay), 'expose-event', TGCallback(@OnExposeOverlay), nil);
 
   Widget := gtk_window_new(GTK_WINDOW_TOPLEVEL);
   gtk_window_set_title(PGtkWindow(Widget), 'Grouch Bin');
-  gtk_window_set_decorated(PGtkWindow(Widget), False);
-  gtk_window_set_keep_above(PGtkWindow(Widget), True);
-  gtk_window_set_skip_taskbar_hint(PGtkWindow(Widget), True);
-  gtk_widget_set_app_paintable(Widget, True);
-  if Colormap <> nil then
-    gtk_widget_set_colormap(Widget, Colormap);
-  gtk_window_resize(PGtkWindow(Widget), WidgetW, WidgetH);
+  DecorateOverlay(Widget, WidgetW, WidgetH);
   gtk_window_move(PGtkWindow(Widget), 40, gdk_screen_get_height(Screen) - WidgetH - 80);
-  WidgetDraw := gtk_drawing_area_new;
-  gtk_container_add(PGtkContainer(Widget), WidgetDraw);
-  g_signal_connect(G_OBJECT(WidgetDraw), 'expose-event', TGCallback(@OnExposeWidget), nil);
-  g_signal_connect(G_OBJECT(Widget), 'button-press-event', TGCallback(@OnWidgetClick), nil);
   gtk_widget_add_events(Widget, GDK_BUTTON_PRESS_MASK);
+  g_signal_connect(G_OBJECT(Widget), 'button-press-event', TGCallback(@OnWidgetClick), nil);
+  g_signal_connect(G_OBJECT(Widget), 'map-event', TGCallback(@OnMapWidget), nil);
+  g_signal_connect(G_OBJECT(Widget), 'expose-event', TGCallback(@OnExposeWidget), nil);
 
   StatusIcon := gtk_status_icon_new;
   gtk_status_icon_set_tooltip(StatusIcon, 'The Grouch Tribute');
