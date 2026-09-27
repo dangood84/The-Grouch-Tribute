@@ -4,7 +4,12 @@ unit uhostwin;
 
 { Windows tray icon + small layered overlay. Same TGrouchController as
   macOS; this unit presents BGRA pixels, polls the Recycle Bin, and
-  plays original WAV stings. }
+  plays original WAV stings.
+
+  FPC 3.2.2's Win32 Windows unit does not publish MonitorFromWindow /
+  UpdateLayeredWindow / TMonitorInfo / a usable NOTIFYICONDATA.Wnd.
+  Same workaround as Lemmings Overlay: declare the layered-window call
+  and size the overlay with GetSystemMetrics / SPI_GETWORKAREA. }
 
 interface
 
@@ -15,8 +20,30 @@ implementation
 {$IFDEF WINDOWS}
 
 uses
-  Windows, Messages, ShellAPI, SysUtils, MMSystem, ugrouchconfig,
+  Windows, Messages, SysUtils, MMSystem, ugrouchconfig,
   ugrouchapp, ugrouchaudio, ugrouchrender, ugrouchtrash;
+
+type
+  TOverlaySize = packed record
+    cx, cy: LongInt;
+  end;
+  TBlendFn = packed record
+    BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat: Byte;
+  end;
+  TTrayIconData = packed record
+    cbSize: DWORD;
+    Wnd: HWND;
+    uID: UINT;
+    uFlags: UINT;
+    uCallbackMessage: UINT;
+    hIcon: HICON;
+    szTip: array[0..63] of AnsiChar;
+  end;
+  TSHQueryRBInfo = record
+    cbSize: DWORD;
+    i64Size: Int64;
+    i64NumItems: Int64;
+  end;
 
 const
   AppName = 'TheGrouchWnd';
@@ -35,13 +62,21 @@ const
   WidgetH = 160;
   TickId = 1;
   TickMs = 33;
+  UlwAlpha = 2;
+  AcSrcOver = 0;
+  AcSrcAlpha = 1;
+  NimAdd = 0;
+  NimDelete = 2;
+  NifMessage = 1;
+  NifIcon = 2;
+  NifTip = 4;
 
-type
-  TSHQueryRBInfo = record
-    cbSize: DWORD;
-    i64Size: Int64;
-    i64NumItems: Int64;
-  end;
+function UpdateLayeredWindow(Wnd: HWND; hdcDst: HDC; pptDst: PPoint;
+  psize: Pointer; hdcSrc: HDC; pptSrc: PPoint; crKey: COLORREF;
+  pblend: Pointer; dwFlags: DWORD): BOOL; stdcall; external 'user32.dll' name 'UpdateLayeredWindow';
+
+function ShellNotifyIcon(dwMessage: DWORD; lpData: Pointer): BOOL; stdcall;
+  external 'shell32.dll' name 'Shell_NotifyIconA';
 
 function SHQueryRecycleBinA(pszRootPath: PAnsiChar; var Info: TSHQueryRBInfo): HRESULT;
   stdcall; external 'shell32.dll' name 'SHQueryRecycleBinA';
@@ -50,7 +85,7 @@ var
   Controller: TGrouchController;
   OverlayWnd: HWND;
   WidgetWnd: HWND;
-  TrayIcon: NOTIFYICONDATA;
+  TrayIcon: TTrayIconData;
   Bgra: array of Byte;
   SfxWav: array[sfxLid..sfxSong] of TBytes;
   SfxHold: array[0..3] of TBytes;
@@ -105,8 +140,8 @@ var
   Info: BITMAPINFO;
   Bits: Pointer;
   Dib, Old: HBITMAP;
-  Blend: BLENDFUNCTION;
-  Size: SIZE;
+  Blend: TBlendFn;
+  LayerSize: TOverlaySize;
   SrcPt, DstPt: TPoint;
   R: TRect;
 begin
@@ -130,17 +165,17 @@ begin
     Move(Bgra[0], Bits^, Length(Bgra));
 
   GetWindowRect(Wnd, R);
-  Size.cx := Buf.Width;
-  Size.cy := Buf.Height;
+  LayerSize.cx := Buf.Width;
+  LayerSize.cy := Buf.Height;
   SrcPt.X := 0;
   SrcPt.Y := 0;
   DstPt.X := R.Left;
   DstPt.Y := R.Top;
   FillChar(Blend, SizeOf(Blend), 0);
-  Blend.BlendOp := AC_SRC_OVER;
+  Blend.BlendOp := AcSrcOver;
   Blend.SourceConstantAlpha := 255;
-  Blend.AlphaFormat := AC_SRC_ALPHA;
-  UpdateLayeredWindow(Wnd, ScreenDC, @DstPt, @Size, MemDC, @SrcPt, 0, @Blend, ULW_ALPHA);
+  Blend.AlphaFormat := AcSrcAlpha;
+  UpdateLayeredWindow(Wnd, ScreenDC, @DstPt, @LayerSize, MemDC, @SrcPt, 0, @Blend, UlwAlpha);
 
   SelectObject(MemDC, Old);
   if Dib <> 0 then
@@ -151,8 +186,7 @@ end;
 
 procedure PlaceOverlay;
 var
-  Mi: TMonitorInfo;
-  Mon: HMONITOR;
+  Work: TRect;
   X, Y: Integer;
   Wr: TRect;
 begin
@@ -164,12 +198,14 @@ begin
       OverlayW, OverlayH, SWP_SHOWWINDOW);
     Exit;
   end;
-  FillChar(Mi, SizeOf(Mi), 0);
-  Mi.cbSize := SizeOf(Mi);
-  Mon := MonitorFromWindow(OverlayWnd, MONITOR_DEFAULTTOPRIMARY);
-  GetMonitorInfo(Mon, @Mi);
-  X := Mi.rcWork.Right - OverlayW - 24;
-  Y := Mi.rcWork.Bottom - OverlayH - 8;
+  FillChar(Work, SizeOf(Work), 0);
+  if not SystemParametersInfo(SPI_GETWORKAREA, 0, @Work, 0) then
+  begin
+    Work.Right := GetSystemMetrics(SM_CXSCREEN);
+    Work.Bottom := GetSystemMetrics(SM_CYSCREEN);
+  end;
+  X := Work.Right - OverlayW - 24;
+  Y := Work.Bottom - OverlayH - 8;
   SetWindowPos(OverlayWnd, HWND_TOPMOST, X, Y, OverlayW, OverlayH, SWP_SHOWWINDOW);
 end;
 
@@ -203,7 +239,8 @@ end;
 
 procedure ShowAbout(Wnd: HWND);
 begin
-  MessageBox(Wnd, PChar(GrouchAboutText), GrouchAboutTitle, MB_OK or MB_ICONINFORMATION);
+  MessageBox(Wnd, PChar(GrouchAboutText), PChar(GrouchAboutTitle),
+    MB_OK or MB_ICONINFORMATION);
 end;
 
 procedure PopupMenuAtCursor(Wnd: HWND);
@@ -212,12 +249,12 @@ var
   Pt: TPoint;
 begin
   Menu := CreatePopupMenu;
-  AppendMenu(Menu, MF_STRING, CmdComeOut, '&Come Out!');
-  AppendMenu(Menu, MF_STRING, CmdMute, '&Mute Sounds');
-  AppendMenu(Menu, MF_STRING, CmdWidget, 'Show Desktop &Bin');
+  AppendMenu(Menu, MF_STRING, CmdComeOut, PChar('&Come Out!'));
+  AppendMenu(Menu, MF_STRING, CmdMute, PChar('&Mute Sounds'));
+  AppendMenu(Menu, MF_STRING, CmdWidget, PChar('Show Desktop &Bin'));
   AppendMenu(Menu, MF_SEPARATOR, 0, nil);
-  AppendMenu(Menu, MF_STRING, CmdAbout, '&About...');
-  AppendMenu(Menu, MF_STRING, CmdQuit, 'E&xit');
+  AppendMenu(Menu, MF_STRING, CmdAbout, PChar('&About...'));
+  AppendMenu(Menu, MF_STRING, CmdQuit, PChar('E&xit'));
   GetCursorPos(Pt);
   SetForegroundWindow(Wnd);
   TrackPopupMenu(Menu, TPM_RIGHTBUTTON, Pt.X, Pt.Y, 0, Wnd, nil);
@@ -269,7 +306,7 @@ begin
     WM_DESTROY:
       begin
         KillTimer(Wnd, TickId);
-        Shell_NotifyIcon(NIM_DELETE, @TrayIcon);
+        ShellNotifyIcon(NimDelete, @TrayIcon);
         PlaySound(nil, 0, 0);
         PostQuitMessage(0);
       end;
@@ -336,11 +373,12 @@ begin
   TrayIcon.cbSize := SizeOf(TrayIcon);
   TrayIcon.Wnd := OverlayWnd;
   TrayIcon.uID := IdTray;
-  TrayIcon.uFlags := NIF_MESSAGE or NIF_TIP or NIF_ICON;
+  TrayIcon.uFlags := NifMessage or NifTip or NifIcon;
   TrayIcon.uCallbackMessage := WmTray;
   TrayIcon.hIcon := LoadIcon(0, IDI_APPLICATION);
-  StrPCopy(TrayIcon.szTip, 'The Grouch Tribute');
-  Shell_NotifyIcon(NIM_ADD, @TrayIcon);
+  FillChar(TrayIcon.szTip, SizeOf(TrayIcon.szTip), 0);
+  StrPLCopy(@TrayIcon.szTip[0], 'The Grouch Tribute', High(TrayIcon.szTip));
+  ShellNotifyIcon(NimAdd, @TrayIcon);
 
   SetTimer(OverlayWnd, TickId, TickMs, nil);
   ShowWindow(OverlayWnd, SW_HIDE);
