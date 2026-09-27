@@ -212,7 +212,7 @@ var
 begin
   Dlg := gtk_message_dialog_new(nil, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO,
     GTK_BUTTONS_OK, PChar(GrouchAboutText));
-  gtk_window_set_title(PGtkWindow(Dlg), GrouchAboutTitle);
+  gtk_window_set_title(PGtkWindow(Dlg), PChar(GrouchAboutTitle));
   gtk_dialog_run(PGtkDialog(Dlg));
   gtk_widget_destroy(Dlg);
 end;
@@ -239,21 +239,22 @@ var
 begin
   Menu := gtk_menu_new;
   Item := gtk_menu_item_new_with_label('Come Out!');
-  g_signal_connect(G_OBJECT(Item), 'activate', TG_SIGNAL_FUNC(@OnComeOut), nil);
+  { Linux FPC gtk2 has TGCallback (glib GCallback), not TG_SIGNAL_FUNC. }
+  g_signal_connect(G_OBJECT(Item), 'activate', TGCallback(@OnComeOut), nil);
   gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
   Item := gtk_menu_item_new_with_label('Mute Sounds');
-  g_signal_connect(G_OBJECT(Item), 'activate', TG_SIGNAL_FUNC(@OnMute), nil);
+  g_signal_connect(G_OBJECT(Item), 'activate', TGCallback(@OnMute), nil);
   gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
   Item := gtk_menu_item_new_with_label('Show Desktop Bin');
-  g_signal_connect(G_OBJECT(Item), 'activate', TG_SIGNAL_FUNC(@OnWidget), nil);
+  g_signal_connect(G_OBJECT(Item), 'activate', TGCallback(@OnWidget), nil);
   gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
   Item := gtk_separator_menu_item_new;
   gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
   Item := gtk_menu_item_new_with_label('About The Grouch Tribute');
-  g_signal_connect(G_OBJECT(Item), 'activate', TG_SIGNAL_FUNC(@OnAbout), nil);
+  g_signal_connect(G_OBJECT(Item), 'activate', TGCallback(@OnAbout), nil);
   gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
   Item := gtk_menu_item_new_with_label('Quit');
-  g_signal_connect(G_OBJECT(Item), 'activate', TG_SIGNAL_FUNC(@OnQuit), nil);
+  g_signal_connect(G_OBJECT(Item), 'activate', TGCallback(@OnQuit), nil);
   gtk_menu_shell_append(PGtkMenuShell(Menu), Item);
   gtk_widget_show_all(Menu);
   Result := Menu;
@@ -356,8 +357,8 @@ begin
   gtk_window_resize(PGtkWindow(Overlay), OverlayW, OverlayH);
   OverlayDraw := gtk_drawing_area_new;
   gtk_container_add(PGtkContainer(Overlay), OverlayDraw);
-  g_signal_connect(G_OBJECT(OverlayDraw), 'expose-event', TG_SIGNAL_FUNC(@OnExposeOverlay), nil);
-  g_signal_connect(G_OBJECT(Overlay), 'delete-event', TG_SIGNAL_FUNC(@OnQuit), nil);
+  g_signal_connect(G_OBJECT(OverlayDraw), 'expose-event', TGCallback(@OnExposeOverlay), nil);
+  g_signal_connect(G_OBJECT(Overlay), 'delete-event', TGCallback(@OnQuit), nil);
 
   Widget := gtk_window_new(GTK_WINDOW_TOPLEVEL);
   gtk_window_set_title(PGtkWindow(Widget), 'Grouch Bin');
@@ -371,13 +372,13 @@ begin
   gtk_window_move(PGtkWindow(Widget), 40, gdk_screen_get_height(Screen) - WidgetH - 80);
   WidgetDraw := gtk_drawing_area_new;
   gtk_container_add(PGtkContainer(Widget), WidgetDraw);
-  g_signal_connect(G_OBJECT(WidgetDraw), 'expose-event', TG_SIGNAL_FUNC(@OnExposeWidget), nil);
-  g_signal_connect(G_OBJECT(Widget), 'button-press-event', TG_SIGNAL_FUNC(@OnWidgetClick), nil);
+  g_signal_connect(G_OBJECT(WidgetDraw), 'expose-event', TGCallback(@OnExposeWidget), nil);
+  g_signal_connect(G_OBJECT(Widget), 'button-press-event', TGCallback(@OnWidgetClick), nil);
   gtk_widget_add_events(Widget, GDK_BUTTON_PRESS_MASK);
 
   StatusIcon := gtk_status_icon_new;
   gtk_status_icon_set_tooltip(StatusIcon, 'The Grouch Tribute');
-  g_signal_connect(G_OBJECT(StatusIcon), 'popup-menu', TG_SIGNAL_FUNC(@OnStatusPopup), nil);
+  g_signal_connect(G_OBJECT(StatusIcon), 'popup-menu', TGCallback(@OnStatusPopup), nil);
 
   g_timeout_add(TickMs, TGSourceFunc(@OnTick), nil);
   Present;
