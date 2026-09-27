@@ -25,6 +25,8 @@ function gtk_status_icon_new: PGtkStatusIcon; cdecl; external;
 procedure gtk_status_icon_set_from_pixbuf(icon: PGtkStatusIcon; pixbuf: PGdkPixbuf); cdecl; external;
 procedure gtk_status_icon_set_visible(icon: PGtkStatusIcon; visible: gboolean); cdecl; external;
 procedure gtk_status_icon_set_tooltip(icon: PGtkStatusIcon; text: Pgchar); cdecl; external;
+{ FPC's gdk2 ppu often omits this; libgdk-x11-2.0 still exports it. }
+function gdk_screen_get_rgba_colormap(screen: PGdkScreen): PGdkColormap; cdecl; external;
 
 const
   OverlayW = 160;
